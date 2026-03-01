@@ -304,6 +304,19 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         self.chunk_break_combo.pack(side="right")
         self.chunk_break_combo.set("Sentence 就近句号")
         
+        # Theme Switch
+        self.theme_var = ctk.StringVar(value="Dark")
+        self.theme_switch = ctk.CTkSwitch(
+            settings_panel,
+            text="🌙 暗黑模式",
+            variable=self.theme_var,
+            onvalue="Dark",
+            offvalue="Light",
+            command=self.toggle_theme
+        )
+        self.theme_switch.pack(anchor="w", pady=(10, 10))
+        ToolTip(self.theme_switch, "切换软件界面的浅色/暗黑模式。")
+
         # Scan Button
         self.scan_btn = ctk.CTkButton(settings_panel, text="扫描预览", command=self.scan_file)
         self.scan_btn.pack(fill="x", pady=(10, 0))
@@ -402,6 +415,14 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         else:
             self.chunk_inputs_frame.pack_forget()
             self.chunk_break_frame.pack_forget()
+
+    def toggle_theme(self):
+        mode = self.theme_var.get()
+        ctk.set_appearance_mode(mode)
+        if mode == "Dark":
+            self.theme_switch.configure(text="🌙 暗黑模式")
+        else:
+            self.theme_switch.configure(text="☀️ 浅色模式")
     
     def handle_drop(self, event):
         files = self.tk.splitlist(event.data)
