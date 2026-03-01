@@ -1,0 +1,33 @@
+Prologue
+
+This is the prologue of a test novel.
+It should be captured as a separate section.
+
+Part One
+
+The adventure begins here.
+
+Chapter 1 The Beginning
+
+This is the first chapter of our test novel.
+We are testing English regex matching functionality.
+
+Chapter 2 The Bug
+
+This is the second chapter. The text splitter seems to work well!
+Let's see if it handles English patterns correctly.
+
+Part Two
+
+A new part of the story starts here.
+More content to ensure this part is not filtered out.
+Additional text for testing purposes.
+
+Chapter Three The Finale
+
+Yes, Chapter Three is the grand finale.
+Testing complete.
+
+Epilogue
+
+A brief epilogue to wrap things up.
