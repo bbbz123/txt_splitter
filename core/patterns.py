@@ -385,12 +385,16 @@ def detect_all_languages(text_sample: str) -> list[str]:
     
     found = []
     
-    # If there's a significant amount of CJK, it's definitely Chinese
-    if cjk_count > 50: 
+    cjk_ratio = cjk_count / max(1, len(sample))
+    latin_ratio = latin_count / max(1, len(sample))
+
+    # Add Chinese if there is a meaningful amount of CJK characters
+    if cjk_count > 50 or cjk_ratio > 0.05: 
         found.append('zh')
     
-    # If there's a significant amount of Latin, it's definitely English/French/etc.
-    if latin_count > 50: # Lowered threshold slightly
+    # Add English if there's a strong presence of Latin characters.
+    # Higher absolute threshold to prevent false positives from acronyms/math in Chinese books.
+    if latin_count > 400 or latin_ratio > 0.10: 
         found.append('en')
         
     # If nothing detected, default to 'zh'

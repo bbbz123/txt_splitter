@@ -867,7 +867,7 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
                     
                     # Traverse and create necessary folder nodes
                     for folder in folder_levels:
-                        folder_safe = _re.sub(r'[\\/*?:"<>|]', "", folder.strip())
+                        folder_safe = re.sub(r'[\\/*?:"<>|]', "", folder.strip())
                         if not folder_safe:
                             continue
                             

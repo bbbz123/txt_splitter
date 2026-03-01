@@ -1,0 +1,92 @@
+Metadata-Version: 2.4
+Name: chardet
+Version: 6.0.0.post1
+Summary: Universal encoding detector for Python 3
+Project-URL: Documentation, https://chardet.readthedocs.io/
+Project-URL: Homepage, http://chardet.github.io
+Project-URL: Issues, https://github.com/chardet/chardet/issues
+Project-URL: Repository, https://github.com/chardet/chardet
+Author-email: Mark Pilgrim <mark@diveintomark.org>
+Maintainer: Ian Cordasco
+Maintainer-email: Dan Blanchard <dan.blanchard@gmail.com>
+License: LGPL-2.1-or-later
+License-File: LICENSE
+Keywords: encoding,i18n,xml
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: GNU Lesser General Public License v2 or later (LGPLv2+)
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Programming Language :: Python :: 3.14
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Programming Language :: Python :: Implementation :: PyPy
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Classifier: Topic :: Text Processing :: Linguistic
+Requires-Python: >=3.10
+Description-Content-Type: text/x-rst
+
+Chardet: The Universal Character Encoding Detector
+--------------------------------------------------
+
+.. image:: https://github.com/chardet/chardet/actions/workflows/test.yml/badge.svg?branch=main
+   :alt: Build status
+   :target: https://github.com/chardet/chardet/actions/workflows/test.yml
+
+.. image:: https://img.shields.io/pypi/v/chardet.svg
+   :target: https://pypi.org/project/chardet/
+   :alt: Latest version on PyPI
+
+.. image:: https://img.shields.io/pypi/l/chardet.svg
+   :alt: License
+
+
+Detects over 70 character encodings including:
+
+- All major Unicode encodings (UTF-8, UTF-16, UTF-32)
+- Windows code pages (Windows-1250 through Windows-1258)
+- ISO-8859 family (ISO-8859-1 through ISO-8859-16)
+- CJK encodings (Big5, GB18030, EUC-JP, EUC-KR, Shift-JIS, and more)
+- Cyrillic encodings (KOI8-R, KOI8-U, IBM866, and more)
+- Mac encodings (MacRoman, MacCyrillic, and more)
+- DOS/OEM code pages (CP437, CP850, CP866, and more)
+- EBCDIC variants (CP037, CP500)
+
+See the `full list of supported encodings <https://chardet.readthedocs.io/en/latest/supported-encodings.html>`_.
+
+
+Requires Python 3.10+.
+
+Installation
+------------
+
+Install from `PyPI <https://pypi.org/project/chardet/>`_::
+
+    pip install chardet
+
+Documentation
+-------------
+
+For users, docs are now available at https://chardet.readthedocs.io/.
+
+Command-line Tool
+-----------------
+
+chardet comes with a command-line script which reports on the encodings of one
+or more files::
+
+    % chardetect somefile someotherfile
+    somefile: windows-1252 with confidence 0.5
+    someotherfile: ascii with confidence 1.0
+
+About
+-----
+
+This is a continuation of Mark Pilgrim's excellent original chardet port from C, and `Ian Cordasco <https://github.com/sigmavirus24>`_'s
+`charade <https://github.com/sigmavirus24/charade>`_ Python 3-compatible fork.
+
+:maintainer: Dan Blanchard
