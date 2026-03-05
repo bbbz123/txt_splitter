@@ -6,10 +6,13 @@ import os
 import re
 import threading
 from tkinter import filedialog, messagebox, ttk
-import datetime
+from collections import Counter
 
 from core.parser import TextParser  # type: ignore[import]
-from core.patterns import get_language, get_all_languages, detect_language, detect_all_languages, build_regexes_from_tokens  # type: ignore[import]
+from core.patterns import get_language, get_all_languages, detect_language, build_regexes_from_tokens  # type: ignore[import]
+from core.document_loader import SUPPORTED_INPUT_EXTS  # type: ignore[import]
+from core.mode_utils import is_chapter_mode, is_constraint_mode, is_line_mode, is_paragraph_mode, is_word_mode  # type: ignore[import]
+from core.split_service import SplitService  # type: ignore[import]
 from gui.per_file_settings import PerFileSettingsWindow
 from typing import Optional, List, Dict, Any
 
@@ -80,11 +83,14 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         
         # Internal state
         self.parser = TextParser()
+        self.split_service = SplitService(self.parser)
         self.selected_files: List[str] = []
         self.output_dir: Optional[str] = None
         self.parsed_chapters: Dict[str, Any] = {}
         self.file_encoding: Optional[str] = None
         self.file_settings: Dict[str, Dict[str, Any]] = {}
+        self.file_count_var = ctk.StringVar(value="未选择文件")
+        self.status_var = ctk.StringVar(value="就绪")
         
         # Configure layout (2 rows)
         self.grid_rowconfigure(0, weight=1)
@@ -106,20 +112,38 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         # ---- Left Panel: Settings ----
         settings_panel = ctk.CTkFrame(main_frame, fg_color="transparent")
         settings_panel.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        
+
         # File Drop/Select Area
-        self.file_var = ctk.StringVar(value="拖拽 TXT 文件到此处或点击选择")
+        self.file_var = ctk.StringVar(value="拖拽文件到此处或点击选择")
         self.file_btn = ctk.CTkButton(
-            settings_panel, 
-            textvariable=self.file_var, 
+            settings_panel,
+            textvariable=self.file_var,
             height=60,
             command=self.select_file
         )
-        self.file_btn.pack(fill="x", pady=(0, 20))
+        self.file_btn.pack(fill="x", pady=(0, 6))
         self.file_btn.drop_target_register(DND_FILES)
         self.file_btn.dnd_bind('<<Drop>>', self.handle_drop)
-        ToolTip(self.file_btn, "点击选择要分割的 txt 文件，或直接将其拖拽到当前窗口内。\n引擎会自动识别文件编码格式。")
-        
+        ToolTip(
+            self.file_btn,
+            "选择输入文件，或直接拖拽到这里。\n支持: txt, epub, docx, mobi, azw3, 部分 pdf。",
+        )
+
+        file_meta_frame = ctk.CTkFrame(settings_panel, fg_color="transparent")
+        file_meta_frame.pack(fill="x", pady=(0, 10))
+        self.file_count_label = ctk.CTkLabel(file_meta_frame, textvariable=self.file_count_var, text_color="gray")
+        self.file_count_label.pack(side="left")
+        self.clear_files_btn = ctk.CTkButton(file_meta_frame, text="清空", width=70, command=self.clear_files)
+        self.clear_files_btn.pack(side="right")
+        ToolTip(self.clear_files_btn, "清空当前选择并重置预览。")
+
+        fmt_label = ctk.CTkLabel(
+            settings_panel,
+            text="支持格式: txt / epub / docx / mobi / azw3 / pdf(部分)",
+            text_color="gray",
+        )
+        fmt_label.pack(anchor="w", pady=(0, 12))
+
         # Individual Settings Button (Hidden by default)
         self.indiv_settings_btn = ctk.CTkButton(
             settings_panel, 
@@ -362,16 +386,67 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
     def _build_action_frame(self):
         action_frame = ctk.CTkFrame(self, fg_color="transparent")
         action_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 20))
-        
-        self.progress_bar = ctk.CTkProgressBar(action_frame)
-        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 20))
+
+        controls_row = ctk.CTkFrame(action_frame, fg_color="transparent")
+        controls_row.pack(fill="x")
+
+        self.progress_bar = ctk.CTkProgressBar(controls_row)
+        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 12))
         self.progress_bar.set(0)
-        
-        self.split_btn = ctk.CTkButton(action_frame, text="开始分割", command=self.start_split, state="disabled")
+
+        self.split_btn = ctk.CTkButton(controls_row, text="开始切割", command=self.start_split, state="disabled")
         self.split_btn.pack(side="right")
-        ToolTip(self.split_btn, "确认上方配置并进行正式的文件拆分操作！")
+        ToolTip(self.split_btn, "按当前配置执行切割。")
+
+        self.status_label = ctk.CTkLabel(action_frame, textvariable=self.status_var, anchor="w", text_color="gray")
+        self.status_label.pack(fill="x", pady=(6, 0))
 
     # --- Event Handlers ---
+
+    def _is_constraint_mode(self, mode: Optional[str] = None) -> bool:
+        target_mode = mode if mode is not None else self.output_mode_combo.get()
+        return is_constraint_mode(target_mode)
+
+    def _scan_button_label(self, mode: Optional[str] = None) -> str:
+        return "预览切割效果" if self._is_constraint_mode(mode) else "扫描预览"
+
+    def _set_scan_button_ready(self, mode: Optional[str] = None):
+        self.scan_btn.configure(state="normal", text=self._scan_button_label(mode))
+
+    def _collect_global_settings(self, include_output_dir: bool = False) -> Dict[str, Any]:
+        settings: Dict[str, Any] = {
+            "mode": self.output_mode_combo.get(),
+            "strategy": self.strategy_var.get(),
+            "structure": self.structure_var.get().replace("，", ","),
+            "language": self._get_selected_lang_id(),
+            "constraint_limit": self.constraint_limit_var.get(),
+            "constraint_comparator": self.constraint_comparator_var.get(),
+            "chunk_break": self.chunk_break_combo.get(),
+            "max_length": self.max_len_var.get(),
+            "chunk_size": self.chunk_size_var.get(),
+            "enable_chunking": self.enable_chunking_var.get(),
+            "trigger_comparator": self.comparator_var.get(),
+            "chunk_size_comparator": self.chunk_size_comparator_var.get(),
+            "include_body": self.include_body_var.get(),
+            "skip_toc": self.skip_toc_var.get(),
+        }
+        if include_output_dir:
+            settings["output_dir"] = self.out_var.get()
+        return settings
+
+    def _friendly_error_message(self, err_msg: str) -> str:
+        msg = (err_msg or "").strip()
+        lower = msg.lower()
+        if "no extractable text found in pdf" in lower or "returned no text" in lower:
+            return (
+                "该 PDF 的文本层读取失败（常见于图片型/扫描型 PDF）。\n"
+                "当前不做 OCR，请先在外部工具中导出可复制文本后再导入。"
+            )
+        if "unsupported input format" in lower:
+            return "文件格式不受支持，请检查扩展名。"
+        if "unable to locate usable extracted content" in lower or "drm" in lower:
+            return "电子书可能受 DRM 保护或提取失败，暂时无法读取。"
+        return msg
     
     def on_mode_change(self, value):
         # Reset chunk views
@@ -383,7 +458,7 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         self.chunk_break_frame.pack_forget()
         
         # Re-pack in correct order
-        if "章节模式" in value or "Regex" in value:
+        if is_chapter_mode(value):
             self.strategy_frame.pack(fill="x", pady=(0, 10), after=self.output_mode_combo.master)
             self.struct_container.pack(fill="x", pady=(0, 10), after=self.strategy_frame)
             self.chunking_checkbox_frame.pack(fill="x", pady=(5, 0), after=self.struct_container)
@@ -391,22 +466,23 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
                 self.chunk_inputs_frame.pack(fill="x", pady=(5, 0), after=self.chunking_checkbox_frame)
                 self.chunk_break_frame.pack(fill="x", pady=(5, 0), after=self.chunk_inputs_frame)
             
-            self.scan_btn.configure(state="normal", text="扫描预览")
+            self._set_scan_button_ready(value)
             if not self.parsed_chapters:
                 self.split_btn.configure(state="disabled")
         else:
             self.constraint_frame.pack(fill="x", pady=(0, 20), after=self.output_mode_combo.master)
             
-            if "字数" in value or "Word" in value:
+            if is_word_mode(value):
                 self.chunk_break_frame.pack(fill="x", pady=(5, 0), after=self.constraint_frame)
-            elif "行数" in value or "段落" in value or "Line" in value or "Paragraph" in value:
+            elif is_line_mode(value) or is_paragraph_mode(value):
                 self.chunking_checkbox_frame.pack(fill="x", pady=(5, 0), after=self.constraint_frame)
                 if self.enable_chunking_var.get():
                     self.chunk_inputs_frame.pack(fill="x", pady=(5, 0), after=self.chunking_checkbox_frame)
                     self.chunk_break_frame.pack(fill="x", pady=(5, 0), after=self.chunk_inputs_frame)
             
-            self.scan_btn.configure(state="normal", text="预览切割效果")
+            self._set_scan_button_ready(value)
             self.split_btn.configure(state="normal")
+        self.status_var.set(f"模式已更新，可预览 {len(getattr(self, 'parsed_chapters', {}))} 个文件。")
     
     def toggle_chunking(self):
         if self.enable_chunking_var.get():
@@ -426,33 +502,73 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
     
     def handle_drop(self, event):
         files = self.tk.splitlist(event.data)
-        txt_files = [f.strip('{}') for f in files if f.lower().endswith('.txt')]
-        if txt_files:
-            self.set_files(txt_files)
-            
+        supported_files = [f.strip('{}') for f in files if self._is_supported_file(f.strip('{}'))]
+        if supported_files:
+            self.set_files(supported_files)
+        elif files:
+            self.status_var.set("拖拽内容中没有可用文件。")
+            messagebox.showwarning("不支持的文件", "仅支持 txt/epub/docx/mobi/azw3，以及部分 pdf。")
+
     def select_file(self):
-        file_paths = filedialog.askopenfilenames(filetypes=[("Text Files", "*.txt")])
+        pattern = " ".join(f"*{ext}" for ext in sorted(SUPPORTED_INPUT_EXTS))
+        file_paths = filedialog.askopenfilenames(
+            filetypes=[
+                ("Supported Documents", pattern),
+                ("Text Files", "*.txt"),
+                ("PDF Files (Partial)", "*.pdf"),
+                ("EPUB Files", "*.epub"),
+                ("Word Files", "*.docx"),
+                ("Kindle Files", "*.mobi *.azw3"),
+            ]
+        )
         if file_paths:
             self.set_files(list(file_paths))
-            
+
+    def _is_supported_file(self, file_path: str) -> bool:
+        return os.path.splitext(file_path)[1].lower() in SUPPORTED_INPUT_EXTS
+
+    def clear_files(self):
+        self.selected_files = []
+        self.parsed_chapters = {}
+        self.file_settings = {}
+        self.file_encoding = None
+        self.file_var.set("拖拽文件到此处或点击选择")
+        self.file_count_var.set("未选择文件")
+        self.status_var.set("已清空文件列表。")
+        self.out_var.set("未选择")
+        self.update_preview("")
+        self.preview_tree.delete(*self.preview_tree.get_children())
+        self.split_btn.configure(state="disabled")
+        self._set_scan_button_ready()
+        self.progress_bar.set(0)
+        self.indiv_settings_btn.pack_forget()
+
     def set_files(self, file_paths):
         self.selected_files = file_paths
-        
+
         if len(file_paths) == 1:
             filename = os.path.basename(file_paths[0])
-            self.file_var.set(f"已选中: {filename}")
+            self.file_var.set(f"已选择: {filename}")
             output_folder_name = f"{os.path.splitext(filename)[0]}_split"
         else:
-            self.file_var.set(f"批量模式: 已选中 {len(file_paths)} 个文件 (Batch Mode)")
+            self.file_var.set(f"批量模式: 已选择 {len(file_paths)} 个文件")
             output_folder_name = "Batch_Split_Output"
-            
+
+        ext_counter = Counter(os.path.splitext(p)[1].lower() for p in file_paths)
+        ext_summary = ", ".join(f"{k}:{v}" for k, v in sorted(ext_counter.items()))
+        self.file_count_var.set(f"{len(file_paths)} 个文件 | {ext_summary}")
+        self.status_var.set(f"文件已载入，点击“{self._scan_button_label()}”查看效果。")
+
         # Auto-set output dir to same directory as first file
         self.output_dir = os.path.join(os.path.dirname(file_paths[0]), output_folder_name)
         self.out_var.set(self.output_dir)
-        
+
         # Clear preview
         self.update_preview("")
+        self.preview_tree.delete(*self.preview_tree.get_children())
         self.split_btn.configure(state="disabled")
+        self._set_scan_button_ready()
+        self.progress_bar.set(0)
         self.indiv_settings_btn.pack_forget()
 
     def select_output_dir(self):
@@ -509,14 +625,18 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         
     def _analyze_thread(self):
         try:
-            # Resolve language first, which handles 'Auto' -> None to actual lang
-            lang_id = self._resolve_lang_for_file(self.selected_files[0], self.file_encoding)
-            
-            detected_struct = self.parser.analyze_structure(
-                self.selected_files[0], 
-                encoding=self.file_encoding, 
-                lang=lang_id
-            )
+            prepared = self.parser.prepare_document(self.selected_files[0])
+            try:
+                self.file_encoding = prepared.encoding
+                # Resolve language first, which handles 'Auto' -> None to actual lang
+                lang_id = self._resolve_lang_for_file(prepared.working_text_path, prepared.encoding)
+                detected_struct = self.parser.analyze_structure(
+                    prepared.working_text_path,
+                    encoding=prepared.encoding,
+                    lang=lang_id
+                )
+            finally:
+                self.parser.cleanup_prepared_document(prepared)
             self.after(0, self._analyze_complete, detected_struct)
         except Exception as e:
             self.after(0, self._analyze_error, str(e))
@@ -526,10 +646,16 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         self.analyze_btn.configure(state="normal", text="自动分析")
         
     def _analyze_error(self, err_msg):
-        messagebox.showerror("Analysis Error", f"分析失败: {err_msg}")
+        friendly = self._friendly_error_message(err_msg)
+        if "OCR" in friendly or "无法读取" in friendly:
+            messagebox.showwarning("Analysis Notice", friendly)
+        else:
+            messagebox.showerror("Analysis Error", f"分析失败: {friendly}")
         self.analyze_btn.configure(state="normal", text="自动分析")
             
     def update_preview(self, text):
+        self.preview_tree_frame.pack_forget()
+        self.preview_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.preview_box.configure(state="normal")
         self.preview_box.delete("0.0", "end")
         self.preview_box.insert("0.0", text)
@@ -564,18 +690,6 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         if current not in options:
             self.strategy_var.set("Flat 同级输出")
     
-    def _map_ui_comparator(self, label: str) -> str:
-        """Map a UI display label to a parser operator symbol."""
-        mapping = {
-            "≈ 约等于": "≈",
-            "= 等于": "==",
-            "> 大于": ">",
-            "≥ 大于等于": ">=",
-            "< 小于": "<",
-            "≤ 小于等于": "<="
-        }
-        return mapping.get(label, label) # Fallback to raw label if not in mapping
-    
     def _sync_comparator_by_break(self, break_val: str):
         """If anti-truncation is enabled, force all comparators away from 'Exactly Equal'."""
         if "Sentence" in break_val or "Paragraph" in break_val:
@@ -606,13 +720,22 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         if lang_id:
             return lang_id
         # Auto-detect from file content
+        prepared = None
         try:
-            enc = encoding or self.file_encoding or self.parser.detect_encoding(file_path)
-            with open(file_path, 'r', encoding=enc, errors='replace') as f:
+            target_path = file_path
+            enc = encoding or self.file_encoding
+            if not enc or not file_path.lower().endswith('.txt'):
+                prepared = self.parser.prepare_document(file_path)
+                target_path = prepared.working_text_path
+                enc = prepared.encoding
+            with open(target_path, 'r', encoding=enc, errors='replace') as f:
                 sample = f.read(5000)
             return detect_language(sample)
         except Exception:
             return 'zh'
+        finally:
+            if prepared is not None:
+                self.parser.cleanup_prepared_document(prepared)
 
     def get_regexes_from_ui(self):
         regexes = []
@@ -630,136 +753,45 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
             
     def scan_file(self):
         if not self.selected_files:
-            messagebox.showwarning("Warning", "Please select a file first.")
+            messagebox.showwarning("Warning", "请先选择文本文件。")
             return
             
         self.scan_btn.configure(state="disabled", text="处理中...")
-        self.update_preview("Generating preview, please wait...\n")
+        self.status_var.set("正在生成预览...")
+        self.split_btn.configure(state="disabled")
+        self.update_preview("正在生成预览，请稍候...\n")
         
-        # Collect global settings
-        global_settings = {
-            "mode": self.output_mode_combo.get(),
-            "strategy": self.strategy_var.get(),
-            "structure": self.structure_var.get().replace("，", ","),
-            "language": self._get_selected_lang_id(),
-            "constraint_limit": self.constraint_limit_var.get(),
-            "constraint_comparator": self.constraint_comparator_var.get(),
-            "chunk_break": self.chunk_break_combo.get(),
-            "max_length": self.max_len_var.get(),
-            "chunk_size": self.chunk_size_var.get(),
-            "enable_chunking": self.enable_chunking_var.get(),
-            "trigger_comparator": self.comparator_var.get(),
-            "chunk_size_comparator": self.chunk_size_comparator_var.get()
-        }
+        global_settings = self._collect_global_settings()
 
         threading.Thread(target=self._scan_thread, args=(global_settings,), daemon=True).start()
 
     def _scan_thread(self, global_settings: Dict[str, Any]):
         try:
-            all_results = {}
-            # Process up to 10 files for preview to maintain responsiveness
-            preview_files = self.selected_files[:10]
-            first_encoding = None
-            is_batch = len(self.selected_files) > 1
-            
-            for i, file_path in enumerate(preview_files):
-                file_results = {}
-                encoding = self.parser.detect_encoding(file_path)
-                if i == 0:
-                    first_encoding = encoding
-                    self.file_encoding = encoding
-                
-                # Merge per-file settings if present
-                f_settings = self.file_settings.get(file_path, {})
-                
-                def get_s(key):
-                    val = f_settings.get(key)
-                    if val is not None and val != "" and val != "跟随全局 (Global)" and val != "跟随全局":
-                        return val
-                    return global_settings[key]
-                
-                mode = get_s("mode")
-                is_constraint = any(k in mode for k in ["KB", "大小", "字数", "行数", "段落", "Size", "Words", "Lines", "Paragraphs"])
-                
-                if is_constraint:
-                    try:
-                        limit = int(get_s("constraint_limit"))
-                    except ValueError:
-                        limit = 500
-                        
-                    max_length = 0
-                    chunk_size = 0
-                    if global_settings["enable_chunking"] and "字数" not in mode:
-                        try:
-                            max_length = int(global_settings["max_length"])
-                            chunk_size = int(global_settings["chunk_size"])
-                        except ValueError:
-                            pass
-                            
-                    chunk_break = get_s("chunk_break").split()[0]
-                    
-                    kwargs = {
-                        'file_path': file_path,
-                        'encoding': encoding,
-                        'mode': mode,
-                        'limit': limit,
-                        'max_length': max_length,
-                        'chunk_size': chunk_size,
-                        'chunk_break': chunk_break,
-                        'constraint_comparator': self._map_ui_comparator(get_s("constraint_comparator")),
-                        'trigger_comparator': self._map_ui_comparator(global_settings["trigger_comparator"]),
-                        'chunk_size_comparator': self._map_ui_comparator(global_settings["chunk_size_comparator"])
-                    }
-                    chapters = self.parser.preview_constraint(**kwargs)
-                    if chapters:
-                        # Add a flag to identify constraint chapters during UI render
-                        for c in chapters: c['is_constraint'] = True
-                        file_results['zh'] = chapters # Fallback to default lang block for constraint
-                else:
-                    # Regex Parsing Mode
-                    lang_override = f_settings.get("language")
-                    if lang_override and lang_override not in ["跟随全局 (Global)", "跟随全局"]:
-                        if 'Auto' in lang_override:
-                            lang_id = None
-                        elif 'Multi' in lang_override:
-                            lang_id = 'multi'
-                        else:
-                            lang_id = next((lp.lang_id for lp in get_all_languages() if lp.display_name in lang_override), None)
-                    else:
-                        lang_id = global_settings["language"]
-                        
-                    lang_ids = self.parser.resolve_languages(file_path, encoding, lang_id)
+            result = self.split_service.scan_files(
+                selected_files=self.selected_files,
+                global_settings=global_settings,
+                file_settings=self.file_settings,
+                preview_limit=10,
+                status_callback=lambda msg: self.after(0, self.status_var.set, msg),
+            )
 
-                    structure = get_s("structure").replace("，", ",")
-                    # If using global structure in batch mode, we auto-analyze it
-                    if is_batch and f_settings.get("structure", "") == "":
-                        primary_lang = lang_ids[0] if lang_ids else 'zh'
-                        structure = self.parser.analyze_structure(file_path, encoding=encoding, lang=primary_lang)
-                        structure = structure.replace("，", ",")
-                        
-                    tokens = [t.strip() for t in structure.split(",") if t.strip()]
-                    if not tokens: tokens = ["章"] # Fallback target
-                    
-                    for lid in lang_ids:
-                        regexes = build_regexes_from_tokens(tokens, lid)
-                        if not regexes: continue
-                        chapters, _ = self.parser.parse_chapters(file_path, regexes, encoding)
-                        if chapters:
-                            file_results[lid] = chapters
-                
-                if file_results:
-                    all_results[file_path] = file_results
-            
-            self.parsed_chapters = all_results
-            if first_encoding:
-                self.after(0, self.encoding_label.configure, {"text": f"检测到的文件编码: {first_encoding.upper()}"})
-            
-            if not all_results:
+            self.parsed_chapters = result.parsed_chapters
+            if result.first_encoding:
+                self.file_encoding = result.first_encoding
+                self.after(0, self.encoding_label.configure, {"text": f"检测到的文件编码: {result.first_encoding.upper()}"})
+
+            friendly_failed = [(name, self._friendly_error_message(msg)) for name, msg in result.failed_files]
+
+            if not result.parsed_chapters:
                 preview_text = "未发现匹配各语言正则的章节。(No chunks found matching patterns/limits.)"
-                self.after(0, self._scan_complete, preview_text, False)
+                if friendly_failed:
+                    detail = "\n".join(f"- {name}: {msg}" for name, msg in friendly_failed[:8])
+                    if len(friendly_failed) > 8:
+                        detail += f"\n... 以及另外 {len(friendly_failed) - 8} 个文件。"
+                    preview_text += f"\n\n以下文件预览失败:\n{detail}"
+                self.after(0, self._scan_complete, preview_text, False, friendly_failed)
             else:
-                self.after(0, self._scan_complete_and_render)
-            
+                self.after(0, self._scan_complete_and_render, friendly_failed)
         except Exception as e:
             self.after(0, self._scan_error, str(e))
 
@@ -771,7 +803,7 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         if hasattr(self, 'parsed_chapters') and self.parsed_chapters:
             self._scan_complete_and_render()
             
-    def _scan_complete_and_render(self):
+    def _scan_complete_and_render(self, failed_files: Optional[List[tuple[str, str]]] = None):
         self._update_preview_visibility()
         self._render_preview_tree()
         
@@ -779,15 +811,19 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         # or we just let tree frame be packed. update_preview will hide tree frame, so we shouldn't call it.
         # But we must ensure it doesn't pop up.
         
-        mode = self.output_mode_combo.get()
-        is_constraint = any(k in mode for k in ["KB", "大小", "字数", "行数", "段落", "Size", "Words", "Lines", "Paragraphs"])
-        
-        if is_constraint:
-            self.scan_btn.configure(state="normal", text="预览切割效果")
-        else:
-            self.scan_btn.configure(state="normal", text="扫描预览")
-            
+        self._set_scan_button_ready()
         self.split_btn.configure(state="normal")
+        failed_count = len(failed_files or [])
+        if failed_count:
+            self.status_var.set(f"预览完成，{failed_count} 个文件失败。")
+            msg_lines = [f"以下文件预览失败（共 {failed_count} 个）："]
+            for name, msg in (failed_files or [])[:8]:
+                msg_lines.append(f"- {name}: {msg}")
+            if failed_count > 8:
+                msg_lines.append(f"... 以及另外 {failed_count - 8} 个。")
+            messagebox.showwarning("预览部分失败", "\n".join(msg_lines))
+        else:
+            self.status_var.set("预览完成，可开始切割。")
 
     def _render_preview_tree(self):
         """
@@ -903,271 +939,135 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
         if len(self.selected_files) > 10:
              self.preview_tree.insert("", "end", text=f"⚠️ 注意: 仅预览前 10 个文件。")
 
-    def _scan_complete(self, preview_text, enable_split):
+    def _scan_complete(
+        self,
+        preview_text,
+        enable_split,
+        failed_files: Optional[List[tuple[str, str]]] = None,
+    ):
         self.update_preview(preview_text)
-        
-        output_mode = self.output_mode_combo.get()
-        is_constraint = any(k in output_mode for k in ["KB", "大小", "字数", "行数", "段落"])
-        
-        if is_constraint:
-            self.scan_btn.configure(state="normal", text="预览切割效果")
-        else:
-            self.scan_btn.configure(state="normal", text="扫描预览")
+        self._set_scan_button_ready()
             
         if enable_split:
             self.split_btn.configure(state="normal")
+            self.status_var.set("预览完成，可开始切割。")
+        else:
+            failed_count = len(failed_files or [])
+            if failed_count:
+                self.status_var.set(f"预览失败：{failed_count} 个文件无法读取。")
+            else:
+                self.status_var.set("预览完成，未发现可切分内容。")
             
     def _scan_error(self, err_msg):
-        self.update_preview(f"Error scanning file:\n{err_msg}")
-        
-        output_mode = self.output_mode_combo.get()
-        is_constraint = any(k in output_mode for k in ["KB", "大小", "字数", "行数", "段落"])
-        
-        if is_constraint:
-            self.scan_btn.configure(state="normal", text="预览切割效果")
-        else:
-            self.scan_btn.configure(state="normal", text="扫描预览")
+        friendly = self._friendly_error_message(err_msg)
+        self.update_preview(f"扫描失败:\n{friendly}")
+        self._set_scan_button_ready()
             
-        messagebox.showerror("Scan Error", err_msg)
+        self.status_var.set("预览失败。")
+        if "OCR" in friendly or "无法读取" in friendly:
+            messagebox.showwarning("Scan Notice", friendly)
+        else:
+            messagebox.showerror("Scan Error", friendly)
         
     def start_split(self):
         if not self.selected_files:
-            messagebox.showwarning("Warning", "Please select a file first.")
+            messagebox.showwarning("Warning", "请先选择文本文件。")
             return
             
         out_path = self.out_var.get()
         if out_path == "未选择" or not out_path:
-            messagebox.showwarning("Warning", "Please select an output directory.")
+            messagebox.showwarning("Warning", "请选择输出目录。")
             return
             
         # Ensure output directory exists
         os.makedirs(out_path, exist_ok=True)
             
-        global_settings = {
-            "mode": self.output_mode_combo.get(),
-            "strategy": self.strategy_var.get(),
-            "structure": self.structure_var.get().replace("，", ","),
-            "language": self._get_selected_lang_id(),
-            "constraint_limit": self.constraint_limit_var.get(),
-            "constraint_comparator": self.constraint_comparator_var.get(),
-            "chunk_break": self.chunk_break_combo.get(),
-            "max_length": self.max_len_var.get(),
-            "chunk_size": self.chunk_size_var.get(),
-            "enable_chunking": self.enable_chunking_var.get(),
-            "trigger_comparator": self.comparator_var.get(),
-            "chunk_size_comparator": self.chunk_size_comparator_var.get(),
-            "include_body": self.include_body_var.get(),
-            "skip_toc": self.skip_toc_var.get(),
-            "output_dir": out_path
-        }
+        global_settings = self._collect_global_settings(include_output_dir=True)
         
         # Lock UI
-        self.split_btn.configure(state="disabled", text="Splitting...")
+        self.split_btn.configure(state="disabled", text="切割中...")
         self.progress_bar.set(0)
+        self.status_var.set(f"开始切割，共 {len(self.selected_files)} 个文件...")
         
         threading.Thread(target=self._split_thread, args=(global_settings,), daemon=True).start()
         
     def _split_thread(self, global_settings: Dict[str, Any]):
         try:
-            total_files = len(self.selected_files)
-            
-            base_out_path = global_settings.get('output_dir', '')
-            if total_files > 1:
-                # Append a Batch folder so it's clean and doesn't pollute the target
-                batch_folder_name = f"批量输出_Batch_{datetime.datetime.now().strftime('%H%M%S')}"
-                base_out_path = os.path.join(base_out_path, batch_folder_name)
-                os.makedirs(base_out_path, exist_ok=True)
-                
-            for file_idx, file_path in enumerate(self.selected_files):
-                # Update UI for current file
-                file_base_name = os.path.basename(file_path)
-                self.after(0, lambda f=file_base_name, i=file_idx, t=total_files: 
-                    self.file_var.set(f"[{i+1}/{t}] 处理中: {f}"))
-                
-                file_out_dir = base_out_path
-                if total_files > 1:
-                    # Create a subfolder for each file in the batch
-                    file_out_dir = os.path.join(base_out_path, os.path.splitext(file_base_name)[0])
-                    os.makedirs(file_out_dir, exist_ok=True)
-                
-                # Fetch Individual Settings
-                f_settings = self.file_settings.get(file_path, {})
-                def get_s(key):
-                    val = f_settings.get(key)
-                    if val is not None and val != "" and val != "跟随全局 (Global)" and val != "跟随全局":
-                        return val
-                    return global_settings[key]
-                
-                encoding = self.parser.detect_encoding(file_path)
-                if file_idx == 0:
-                    self.file_encoding = encoding
-                    
-                mode = get_s("mode")
-                
-                # Pre-process mode
-                if "章节" in mode or "Chapter" in mode:
-                    strat = get_s("strategy")
-                    if "Nested" in strat:
-                        m = re.search(r'Nested/(\d+)', strat)
-                        mode = f"Nested:{m.group(1)}" if m else "Nested"
-                    else:
-                        mode = "Flat"
-                        
-                is_constraint = any(k in mode for k in ["KB", "大小", "字数", "行数", "段落", "Size", "Words", "Lines", "Paragraphs"])
+            def on_file_start(current: int, total: int, filename: str):
+                self.after(0, self.file_var.set, f"[{current}/{total}] 处理中: {filename}")
 
-                curr_kwargs = {
-                    'output_dir': file_out_dir,
-                    'include_body': global_settings["include_body"],
-                    'skip_toc': global_settings["skip_toc"],
-                    'output_mode': mode,
-                }
-                
-                if is_constraint:
-                    try:
-                        limit = int(get_s("constraint_limit"))
-                    except ValueError:
-                        limit = 500
-                    
-                    max_length = 0
-                    chunk_size = 0
-                    if global_settings["enable_chunking"] and "字数" not in mode:
-                        try:
-                            max_length = int(global_settings["max_length"])
-                            chunk_size = int(global_settings["chunk_size"])
-                        except ValueError:
-                            pass
-                    
-                    chunk_break = get_s("chunk_break").split()[0]
-                    
-                    curr_kwargs.update({
-                        'constraint_limit': limit,
-                        'max_length': max_length,
-                        'chunk_size': chunk_size,
-                        'chunk_break': chunk_break,
-                        'constraint_comparator': self._map_ui_comparator(get_s("constraint_comparator")),
-                        'trigger_comparator': self._map_ui_comparator(global_settings["trigger_comparator"]),
-                        'chunk_size_comparator': self._map_ui_comparator(global_settings["chunk_size_comparator"])
-                    })
-                    
-                    # Call preview_constraint to simulate chunks
-                    chapters = self.parser.preview_constraint(file_path, encoding, mode, limit, max_length, chunk_size, chunk_break, curr_kwargs['constraint_comparator'], curr_kwargs['trigger_comparator'], curr_kwargs['chunk_size_comparator'])
-                    
-                    self.parser.split_file(
-                        file_path=file_path, 
-                        chapters=chapters,
-                        encoding=encoding,
-                        progress_callback=self._update_progress if total_files == 1 else None,
-                        **curr_kwargs
-                    )
-                else:
-                    # Regex Mode
-                    if isinstance(self.parsed_chapters, dict) and file_path in self.parsed_chapters:
-                        lang_results = self.parsed_chapters[file_path]
-                    else:
-                        lang_results = {}
-                        lang_override = f_settings.get("language")
-                        if lang_override and lang_override not in ["跟随全局 (Global)", "跟随全局"]:
-                            if 'Auto' in lang_override:
-                                lang_id = None
-                            elif 'Multi' in lang_override:
-                                lang_id = 'multi'
-                            else:
-                                lang_id = next((lp.lang_id for lp in get_all_languages() if lp.display_name in lang_override), None)
-                        else:
-                            lang_id = global_settings["language"]
-                            
-                        lang_ids = self.parser.resolve_languages(file_path, encoding, lang_id)
+            def on_batch_progress(current: int, total: int):
+                self.after(0, self.progress_bar.set, current / max(total, 1))
+                self.after(0, self.status_var.set, f"批量切割进度: {current}/{total}")
 
-                        structure_raw = get_s("structure").replace("，", ",")
-                        if total_files > 1 and f_settings.get("structure", "") == "":
-                            # auto detect if empty struct in batch
-                            primary_lang = lang_ids[0] if lang_ids else 'zh'
-                            structure_raw = self.parser.analyze_structure(file_path, encoding=encoding, lang=primary_lang)
-                            structure_raw = structure_raw.replace("，", ",")
-                            
-                        tokens = [t.strip() for t in structure_raw.split(",") if t.strip()]
-                        if not tokens: tokens = ["章"] # Fallback
+            result = self.split_service.split_files(
+                selected_files=self.selected_files,
+                global_settings=global_settings,
+                file_settings=self.file_settings,
+                parsed_chapters=self.parsed_chapters if isinstance(self.parsed_chapters, dict) else {},
+                file_start_callback=on_file_start,
+                batch_progress_callback=on_batch_progress,
+                chunk_progress_callback=self._update_progress if len(self.selected_files) == 1 else None,
+            )
 
-                        for lid in lang_ids:
-                            regexes = build_regexes_from_tokens(tokens, lid)
-                            if not regexes: continue
-                            chaps, _ = self.parser.parse_chapters(file_path, regexes, encoding)
-                            if chaps:
-                                lang_results[lid] = chaps
-
-                    if len(lang_results) <= 1:
-                        cid = list(lang_results.keys())[0] if lang_results else 'zh'
-                        chapters = lang_results.get(cid, [])
-                        self.parser.split_file(
-                            file_path=file_path, 
-                            chapters=chapters,
-                            encoding=encoding,
-                            progress_callback=self._update_progress if total_files == 1 else None,
-                            **curr_kwargs
-                        )
-                    else:
-                        # Multi-language Split
-                        if total_files == 1:
-                            nested_dir = os.path.join(base_out_path, os.path.splitext(file_base_name)[0])
-                            os.makedirs(nested_dir, exist_ok=True)
-                            file_out_dir = nested_dir
-
-                        for lid, chapters in lang_results.items():
-                            lang_name = get_language(lid).display_name
-                            lang_out_dir = os.path.join(file_out_dir, lang_name)
-                            os.makedirs(lang_out_dir, exist_ok=True)
-                            
-                            lang_kwargs = curr_kwargs.copy()
-                            lang_kwargs['output_dir'] = lang_out_dir
-                            
-                            self.parser.split_file(
-                                file_path=file_path, 
-                                chapters=chapters,
-                                encoding=encoding,
-                                **lang_kwargs
-                            )
-
-            self.after(0, self._split_complete)
+            friendly_failed = [(name, self._friendly_error_message(msg)) for name, msg in result.failed_files]
+            self.after(0, self._split_complete, friendly_failed, result.total_files, result.output_dir)
         except Exception as e:
             import traceback
             traceback.print_exc()
             self.after(0, self._split_error, str(e))
-            
+
     def _update_progress(self, current, total):
         # Only precise updating for single files, for batch it loops too fast to clearly show inside each file
         # But this works good enough
         val = current / max(total, 1)
         self.after(0, self.progress_bar.set, val)
+        self.after(0, self.status_var.set, f"切割进度: {current}/{max(total, 1)}")
         
-    def _split_complete(self):
-        self.split_btn.configure(state="normal", text="Start Splitting")
+    def _split_complete(
+        self,
+        failed_files: Optional[List[tuple[str, str]]] = None,
+        total_files: Optional[int] = None,
+        output_dir: Optional[str] = None,
+    ):
+        failed_files = failed_files or []
+        total = total_files if total_files is not None else len(self.selected_files)
+        success_count = max(total - len(failed_files), 0)
+
+        self.split_btn.configure(state="normal", text="开始切割")
         self.progress_bar.set(1)
+        self.status_var.set(f"切割完成: 成功 {success_count}/{total} 个文件。")
         if len(self.selected_files) > 1:
-            self.file_var.set(f"批量模式: 已完成 {len(self.selected_files)} 个文件的分割！")
-        messagebox.showinfo("Complete", "Split successful!\nCheck the output directory.")
-        
+            self.file_var.set(f"批量完成: 成功 {success_count}/{total} 个文件")
+
+        if failed_files:
+            msg_lines = [f"处理完成，其中 {len(failed_files)} 个文件失败。"]
+            for filename, err in failed_files[:8]:
+                msg_lines.append(f"- {filename}: {err}")
+            if len(failed_files) > 8:
+                msg_lines.append(f"... 以及另外 {len(failed_files) - 8} 个。")
+            messagebox.showwarning("完成（部分失败）", "\n".join(msg_lines))
+        else:
+            messagebox.showinfo("完成", "切割成功！\n请检查输出目录。")
+
         # Open output folder
         try:
-            out_path = self.out_var.get()
-            if len(self.selected_files) > 1:
-                # Try to open the batch directory instead of the root
-                # Find the most recently created Batch folder (starts with 批量输出_Batch_)
-                if os.path.exists(out_path):
-                    dirs = [os.path.join(out_path, d) for d in os.listdir(out_path) if os.path.isdir(os.path.join(out_path, d)) and d.startswith("批量输出_Batch_")]
-                    if dirs:
-                        out_path = max(dirs, key=os.path.getctime)
-            
+            out_path = output_dir or self.out_var.get()
+
             if os.path.exists(out_path):
                 os.startfile(out_path)  # type: ignore[attr-defined]  # nosec B606
         except Exception as e:
             print(f"Could not open output dir: {e}")
-            
+
     def _split_error(self, err_msg):
-        self.split_btn.configure(state="normal", text="Start Splitting")
+        self.split_btn.configure(state="normal", text="开始切割")
+        self.status_var.set("切割失败。")
         messagebox.showerror("Split Error", err_msg)
 
 if __name__ == "__main__":
     app = GUI()
     app.mainloop()
             
+
+
 

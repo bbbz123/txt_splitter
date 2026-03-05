@@ -25,7 +25,7 @@ def main():
         from tkinterdnd2 import TkinterDnD # type: ignore # noqa: F401
     except ImportError as e:
         print(f"Error: Missing dependencies. {e}")
-        print("Please install requirements: pip install customtkinter tkinterdnd2 chardet")
+        print("Please install requirements: pip install -r requirements.txt")
         return
 
     from gui.app import GUI # type: ignore

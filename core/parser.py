@@ -1,14 +1,43 @@
 # Core Parsing Logic for TXT Splitter | Optimized for bbbz123
 import os
 import re
-from typing import List, Dict, Any, Optional, Tuple, cast
+from contextlib import contextmanager
+from typing import Iterator, List, Dict, Any, Optional, Tuple, cast
 import chardet # type: ignore
 
 from core.patterns import get_language, detect_language
+from core.document_loader import DocumentLoader, PreparedDocument
+from core.mode_utils import (
+    is_constraint_mode,
+    is_line_mode,
+    is_paragraph_mode,
+    is_size_mode,
+    is_word_mode,
+    needs_secondary_constraint_chunking,
+)
 
 class TextParser:
     def __init__(self):
-        pass
+        self.document_loader = DocumentLoader()
+
+    def prepare_document(self, file_path: str) -> PreparedDocument:
+        """Prepare input document into normalized UTF-8 text."""
+        return self.document_loader.prepare(file_path)
+
+    def cleanup_prepared_document(self, doc: PreparedDocument) -> None:
+        self.document_loader.cleanup(doc)
+
+    def cleanup_all_prepared_documents(self) -> None:
+        self.document_loader.cleanup_all()
+
+    @contextmanager
+    def prepared_document(self, file_path: str) -> Iterator[PreparedDocument]:
+        """Context manager wrapper around prepare+cleanup lifecycle."""
+        doc = self.prepare_document(file_path)
+        try:
+            yield doc
+        finally:
+            self.cleanup_prepared_document(doc)
     
     def detect_encoding(self, file_path):
         """
@@ -296,9 +325,7 @@ class TextParser:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
-        # Use substring matching to detect constraint modes (UI strings contain emojis/extra text)
-        constraint_keywords = ["KB", "大小", "字数", "Word Count", "行数", "Line Count", "段落数", "Paragraph Count", "Size"]
-        if any(k in output_mode for k in constraint_keywords):
+        if is_constraint_mode(output_mode):
             return self._split_by_constraint(file_path, output_dir, encoding, output_mode, constraint_limit,
                                               max_length, chunk_size, chunk_break,
                                               constraint_comparator, trigger_comparator, chunk_size_comparator,
@@ -522,32 +549,17 @@ class TextParser:
         try:
             with open(file_path, 'r', encoding=encoding, errors='replace') as f:
                 content = f.read()
-                
-            chunks = []
-            
-            if "KB" in mode or "Size" in mode or "大小" in mode:
-                char_limit = (limit * 1024) // 3
-                chunks = self._chunk_content(content, char_limit, "Exact Size")
-            elif "字数" in mode or "Word Count" in mode or "Words" in mode:
-                chunks = self._chunk_content(content, limit, chunk_break)
-            elif "行数" in mode or "Line Count" in mode or "Lines" in mode:
-                lines = content.splitlines(keepends=True)
-                chunks = ["".join(lines[i:i+limit]) for i in range(0, len(lines), limit)] # type: ignore
-            elif "段落数" in mode or "Paragraph Count" in mode or "Paragraphs" in mode:
-                paragraphs = [p for p in re.split(r'\n+', content) if p.strip()]
-                for i in range(0, len(paragraphs), limit):
-                    chunks.append("\n".join(paragraphs[i:i+limit]) + "\n") # type: ignore
-            else:
-                chunks = [content]
-                
-            if max_length > 0 and chunk_size > 0 and any(k in mode for k in ["行数", "段落数", "Line", "Paragraph"]):
-                refined_chunks = []
-                for chunk_str in chunks:
-                    if self._eval_cond(len(chunk_str), max_length, trigger_comparator):
-                        refined_chunks.extend(self._chunk_content(chunk_str, chunk_size, chunk_break))
-                    else:
-                        refined_chunks.append(chunk_str)
-                chunks = refined_chunks
+
+            chunks = self._build_constraint_chunks(
+                content=content,
+                mode=mode,
+                limit=limit,
+                max_length=max_length,
+                chunk_size=chunk_size,
+                chunk_break=chunk_break,
+                trigger_comparator=trigger_comparator,
+                paragraph_joiner="\n",
+            )
                 
             # Create simulated chapters for preview
             simulated_chapters = []
@@ -577,39 +589,22 @@ class TextParser:
         try:
             with open(file_path, 'r', encoding=encoding, errors='replace') as f:
                 content = f.read()
-                
-            chunks = []
-            
-            if "KB" in mode or "Size" in mode or "大小" in mode:
-                # Approximate split by bytes, assuming 3 bytes per Chinese character on average
-                char_limit = (limit * 1024) // 3
-                chunks = self._chunk_content(content, char_limit, "Exact Size")
-            elif "字数" in mode or "Word Count" in mode or "Words" in mode:
-                # Still respect chunk_break in word mode
-                chunks = self._chunk_content(content, limit, chunk_break)
-            elif "行数" in mode or "Line Count" in mode or "Lines" in mode:
-                lines = content.splitlines(keepends=True)
-                chunks = ["".join(lines[i:i+limit]) for i in range(0, len(lines), limit)] # type: ignore
-            elif "段落数" in mode or "Paragraph Count" in mode or "Paragraphs" in mode:
-                # Roughly split by double newlines or single newlines
-                paragraphs = [p for p in re.split(r'\n+', content) if p.strip()]
-                for i in range(0, len(paragraphs), limit):
-                    chunks.append("\n\n".join(paragraphs[i:i+limit]) + "\n\n") # type: ignore
-            else:
-                chunks = [content]
-                
-            # Second Pass for Lines/Paragraphs if secondary chunking is enabled
-            if max_length > 0 and chunk_size > 0 and any(k in mode for k in ["行数", "段落数", "Line", "Paragraph"]):
-                refined_chunks = []
-                for chunk_str in chunks:
-                    if self._eval_cond(len(chunk_str), max_length, trigger_comparator):
-                        refined_chunks.extend(self._chunk_content(chunk_str, chunk_size, chunk_break))
-                    else:
-                        refined_chunks.append(chunk_str)
-                chunks = refined_chunks
+
+            chunks = self._build_constraint_chunks(
+                content=content,
+                mode=mode,
+                limit=limit,
+                max_length=max_length,
+                chunk_size=chunk_size,
+                chunk_break=chunk_break,
+                trigger_comparator=trigger_comparator,
+                paragraph_joiner="\n\n",
+            )
                 
             total_chunks = len(chunks)
             base_name = os.path.splitext(os.path.basename(file_path))[0]
+            # Drop loader cache hash suffix so output names follow the source file name.
+            base_name = re.sub(r"_[0-9a-f]{12}$", "", base_name)
             
             for idx, chunk_str in enumerate(chunks):
                 out_path = os.path.join(output_dir, f"{base_name}_Part{idx+1:03d}.txt")
@@ -623,6 +618,46 @@ class TextParser:
             raise Exception(f"Constraint Splitting failed: {str(e)}")
             
         return True
+
+    def _build_constraint_chunks(
+        self,
+        content: str,
+        mode: str,
+        limit: int,
+        max_length: int,
+        chunk_size: int,
+        chunk_break: str,
+        trigger_comparator: str,
+        paragraph_joiner: str,
+    ) -> List[str]:
+        chunks: List[str] = []
+
+        if is_size_mode(mode):
+            # Approximate split by bytes, assuming ~3 bytes per Chinese character.
+            char_limit = (limit * 1024) // 3
+            chunks = self._chunk_content(content, char_limit, "Exact Size")
+        elif is_word_mode(mode):
+            chunks = self._chunk_content(content, limit, chunk_break)
+        elif is_line_mode(mode):
+            lines = content.splitlines(keepends=True)
+            chunks = ["".join(lines[i:i + limit]) for i in range(0, len(lines), limit)]  # type: ignore
+        elif is_paragraph_mode(mode):
+            paragraphs = [p for p in re.split(r'\n+', content) if p.strip()]
+            for i in range(0, len(paragraphs), limit):
+                chunks.append(paragraph_joiner.join(paragraphs[i:i + limit]) + paragraph_joiner)  # type: ignore
+        else:
+            chunks = [content]
+
+        if max_length > 0 and chunk_size > 0 and needs_secondary_constraint_chunking(mode):
+            refined_chunks: List[str] = []
+            for chunk_str in chunks:
+                if self._eval_cond(len(chunk_str), max_length, trigger_comparator):
+                    refined_chunks.extend(self._chunk_content(chunk_str, chunk_size, chunk_break))
+                else:
+                    refined_chunks.append(chunk_str)
+            return refined_chunks
+
+        return chunks
 
     def _chunk_content(self, text: str, chunk_size: int, break_mode: str) -> List[str]:
         """

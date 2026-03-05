@@ -40,22 +40,29 @@ def split_user_files():
             continue
             
         print(f"\nProcessing: {item['name']}")
-        
-        # 1. Detect Encoding
-        enc = parser.detect_encoding(file_path)
-        print(f"  Encoding: {enc}")
-        
-        # 2. Parse
-        chapters, final_enc = parser.parse_chapters(file_path, [item["pattern"]], enc)
-        print(f"  Found {len(chapters)} segments.")
-        
-        # 3. Split
-        def progress(curr, tot):
-            if curr % 20 == 0 or curr == tot:
-                print(f"  Progress: {curr}/{tot}")
-                
-        parser.split_file(file_path, chapters, out_path, final_enc, progress_callback=progress)
-        print(f"  Successfully split into: {out_path}")
+
+        with parser.prepared_document(file_path) as prepared:
+            work_path = prepared.working_text_path
+
+            # 1. Detect Encoding
+            enc = prepared.encoding
+            print(f"  Encoding: {enc}")
+
+            # 2. Parse (prefer native chapters when available)
+            if prepared.has_native_structure and prepared.native_chapters:
+                chapters = prepared.native_chapters
+                final_enc = enc
+            else:
+                chapters, final_enc = parser.parse_chapters(work_path, [item["pattern"]], enc)
+            print(f"  Found {len(chapters)} segments.")
+
+            # 3. Split
+            def progress(curr, tot):
+                if curr % 20 == 0 or curr == tot:
+                    print(f"  Progress: {curr}/{tot}")
+
+            parser.split_file(work_path, chapters, out_path, final_enc, progress_callback=progress)
+            print(f"  Successfully split into: {out_path}")
 
 if __name__ == "__main__":
     split_user_files()
