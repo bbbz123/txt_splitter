@@ -4,6 +4,8 @@
 
 TXT Splitter is a powerful and intelligent local text/novel/document splitting tool. The system can intelligently analyze the directory structure embedded within long texts (such as novels, legal documents, etc.), accurately extract true nested levels (from "Volume/Part" to "Chapter/Section", etc.), and completely solve the level confusion problem of various complex single-word and multi-word structures.
 
+Supported input formats: `.txt`, `.epub`, `.docx`, `.mobi`, `.azw3`, and **partial** `.pdf` support.
+
 ![GUI Screenshot](./docs/images/screenshot_gui.png)
 
 In addition to "Chapter-based" splitting based on intelligent directory analysis, it also supports various physical splitting methods based on fixed dimensions and provides an elegant and beautiful Dark/Light interactive graphical user interface (GUI).
@@ -55,7 +57,7 @@ If you wish to perform secondary development and modification:
 
 ## 📖 User Guide
 
-1. **Drag into Files**: Drag the `.txt` files (or a batch of files) you want to split into the "Listbox" of the software's main window. If you don't like dragging, you can also click the plus sign `+` to manually browse and import.
+1. **Drag into Files**: Drag the `.txt/.epub/.docx/.mobi/.azw3` files (or a batch of files) you want to split into the "Listbox" of the software's main window. Some `.pdf` files are also supported when they contain extractable text. If you don't like dragging, you can also click the plus sign `+` to manually browse and import.
 2. **Set Mode**: Select your splitting mode below (Words, Lines, or Chapters).
     - 💡 **Tip**: If splitting by chapters, it is recommended to click the `Analyze` button in the lower left corner of the panel area first, allowing the system to calculate the most suitable structure for the book (e.g., `Part, Chapter, Section`).
     - 💡 **Skip TOC**: When the book contains a very long general table of contents, enabling the "Skip Table of Contents" option can avoid treating the table of contents as an independent, long, fragmented chapter.

@@ -1,3 +1,11 @@
 customtkinter
 chardet
 tkinterdnd2
+pdfplumber
+pypdf
+pdfminer.six
+ebooklib
+beautifulsoup4
+lxml
+python-docx
+mobi
