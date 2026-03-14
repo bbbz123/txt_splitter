@@ -1,5 +1,9 @@
 # TXT Splitter (Intelligent Text Splitter)
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
+![Platform](https://img.shields.io/badge/Platform-Windows-informational)
+
 [中文版](./README.md) | [English Version](./README_EN.md)
 
 TXT Splitter is a powerful and intelligent local text/novel/document splitting tool. The system can intelligently analyze the directory structure embedded within long texts (such as novels, legal documents, etc.), accurately extract true nested levels (from "Volume/Part" to "Chapter/Section", etc.), and completely solve the level confusion problem of various complex single-word and multi-word structures.
@@ -85,6 +89,8 @@ txt_splitter/
 ```
 
 ## 📄 License and Thanks
+
+TXT Splitter is released under the [MIT License](./LICENSE).
 
 This tool is for personal intelligent text organization assistance. Acknowledgments to dependency libraries:
 

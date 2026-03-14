@@ -515,6 +515,7 @@ class GUI(ctk.CTk, TkinterDnD.DnDWrapper): # type: ignore
             filetypes=[
                 ("Supported Documents", pattern),
                 ("Text Files", "*.txt"),
+                ("Markdown Files", "*.md"),
                 ("PDF Files (Partial)", "*.pdf"),
                 ("EPUB Files", "*.epub"),
                 ("Word Files", "*.docx"),

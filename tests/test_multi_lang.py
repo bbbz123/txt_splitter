@@ -4,7 +4,7 @@ sys.path.insert(0, r'D:\ai work\txt_splitter')
 from core.parser import TextParser
 from core.patterns import build_regexes_from_tokens, get_language
 
-def test_file(file_path, log_file):
+def analyze_file(file_path, log_file):
     def log(msg):
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
@@ -43,6 +43,6 @@ if __name__ == '__main__':
     if os.path.exists(test_dir):
         for f in os.listdir(test_dir):
             if f.endswith('.txt'):
-                test_file(os.path.join(test_dir, f), log_file)
+                analyze_file(os.path.join(test_dir, f), log_file)
     else:
         print(f"Directory {test_dir} not found.")

@@ -102,6 +102,18 @@ def test_all_modes():
         print(f"  [FAIL] Split By Paragraphs (2) - Exception: {e}")
 
     # ==========================
+    # Test 4b: Chinese Paragraph Label Compatibility
+    # ==========================
+    try:
+        sub_dir = "test_paragraphs_cn"
+        full_out = os.path.join(out_dir, sub_dir)
+        parser.split_file(test_file, [], full_out, enc,
+                        output_mode="📑 按段落切分", constraint_limit=2)
+        assert_chunk_count("Split By Chinese Paragraph Label (2)", sub_dir, 4, 12)
+    except Exception as e:
+        print(f"  [FAIL] Split By Chinese Paragraph Label (2) - Exception: {e}")
+
+    # ==========================
     # Test 5: Regex Chapter Flat
     # ==========================
     try:

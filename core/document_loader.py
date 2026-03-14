@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import chardet  # type: ignore
 
-SUPPORTED_INPUT_EXTS = {".txt", ".pdf", ".epub", ".docx", ".mobi", ".azw3"}
+SUPPORTED_INPUT_EXTS = {".txt", ".md", ".pdf", ".epub", ".docx", ".mobi", ".azw3"}
 _HTML_EXTS = {".html", ".htm", ".xhtml"}
 
 
@@ -51,6 +51,10 @@ class DocumentLoader:
                 native_chapters=None,
                 has_native_structure=False,
             )
+
+        if ext == ".md":
+            text, chapters = self._extract_markdown_text_and_headings(abs_path)
+            return self._build_prepared(abs_path, ext, text, chapters, [])
 
         if ext == ".pdf":
             text = self._extract_pdf_text(abs_path)
@@ -105,6 +109,11 @@ class DocumentLoader:
         if encoding.lower() in {"gb2312", "gb18030"}:
             return "gbk"
         return encoding
+
+    def _read_text_file(self, file_path: str) -> Tuple[str, str]:
+        encoding = self.detect_encoding(file_path)
+        with open(file_path, "r", encoding=encoding, errors="replace") as f:
+            return f.read(), encoding
 
     def _build_prepared(
         self,
@@ -268,6 +277,60 @@ class DocumentLoader:
         chapters = self._finalize_chapter_ranges(chapter_entries, len(lines))
         return ("\n".join(lines)), chapters
 
+    def _extract_markdown_text_and_headings(
+        self, file_path: str
+    ) -> Tuple[str, Optional[List[Dict[str, Any]]]]:
+        raw_text, _ = self._read_text_file(file_path)
+
+        lines = raw_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        chapter_entries: List[Dict[str, Any]] = []
+        level_stack: List[str] = []
+        in_code_fence = False
+        front_matter_open = False
+
+        for idx, raw_line in enumerate(lines):
+            text = raw_line.strip()
+            if idx == 0 and text == "---":
+                front_matter_open = True
+                continue
+            if front_matter_open:
+                if text in {"---", "..."}:
+                    front_matter_open = False
+                continue
+            if text.startswith(("```", "~~~")):
+                in_code_fence = not in_code_fence
+                continue
+            if in_code_fence:
+                continue
+            if not text:
+                continue
+
+            heading_match = re.match(r"^(#{1,6})\s+(.+?)\s*$", text)
+            if not heading_match:
+                continue
+
+            level = len(heading_match.group(1))
+            heading_text = re.sub(r"\s+#+\s*$", "", heading_match.group(2)).strip()
+            safe_title = self._sanitize_title(heading_text)
+            if not safe_title:
+                continue
+
+            level_stack = level_stack[: level - 1]
+            level_stack.append(safe_title)
+            title_prefix = "".join(f"[{p}] " for p in level_stack[:-1])
+            chapter_entries.append(
+                {
+                    "title": f"{title_prefix}{safe_title}".strip(),
+                    "raw_title": safe_title,
+                    "hierarchy_path": list(level_stack),
+                    "line_start": idx,
+                    "line_end": -1,
+                }
+            )
+
+        chapters = self._finalize_chapter_ranges(chapter_entries, len(lines))
+        return raw_text, chapters
+
     def _heading_level(self, style_name: str) -> Optional[int]:
         if not style_name:
             return None
@@ -299,7 +362,7 @@ class DocumentLoader:
 
             raw_content = item.get_content()
             html = raw_content.decode("utf-8", errors="ignore") if isinstance(raw_content, bytes) else str(raw_content)
-            text = self._extract_html_text(html)
+            text = self._extract_html_text(html, prefer_xml=True)
             if text.strip():
                 lines.extend(text.splitlines())
                 lines.append("")
@@ -372,10 +435,11 @@ class DocumentLoader:
             href = str(getattr(node, "file_name") or "")
         return title.strip(), href.strip()
 
-    def _extract_html_text(self, html: str) -> str:
+    def _extract_html_text(self, html: str, prefer_xml: bool = False) -> str:
         from bs4 import BeautifulSoup  # type: ignore
 
-        soup = BeautifulSoup(html, "lxml")
+        parser = "xml" if prefer_xml else "lxml"
+        soup = BeautifulSoup(html, parser)
         for tag in soup(["script", "style"]):
             tag.extract()
         text = soup.get_text("\n", strip=True)
@@ -395,11 +459,9 @@ class DocumentLoader:
             text, chapters = self._extract_epub_text_and_toc(target_path)
         elif target_ext in _HTML_EXTS:
             with open(target_path, "r", encoding="utf-8", errors="ignore") as f:
-                text = self._extract_html_text(f.read())
+                text = self._extract_html_text(f.read(), prefer_xml=target_ext == ".xhtml")
         elif target_ext == ".txt":
-            enc = self.detect_encoding(target_path)
-            with open(target_path, "r", encoding=enc, errors="replace") as f:
-                text = f.read()
+            text, _ = self._read_text_file(target_path)
         elif target_ext == ".pdf":
             text = self._extract_pdf_text(target_path)
         elif target_ext == ".docx":
