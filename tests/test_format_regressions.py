@@ -7,6 +7,8 @@ from pathlib import Path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
+from ebooklib import epub
+
 from core.document_loader import DocumentLoader
 from core.parser import TextParser
 from core.patterns import build_regexes_from_tokens
@@ -128,6 +130,100 @@ def test_epub_sample_regression_uses_toc_structure(sample_epub_path: Path, tmp_p
     out_files = _txt_filenames(output_dir)
     assert len(out_files) == 3
     assert any("Chapter One" in name for name in out_files)
+
+
+def test_epub_toc_fragment_anchors_map_to_inner_heading_lines(tmp_path: Path):
+    epub_path = tmp_path / "anchored.epub"
+    book = epub.EpubBook()
+    book.set_identifier("anchored-book")
+    book.set_title("Anchored Book")
+    book.set_language("zh")
+
+    chapter = epub.EpubHtml(title="第一章 测试", file_name="chapter.xhtml", lang="zh")
+    chapter.content = """
+    <html><body>
+      <h1>第一章 测试</h1>
+      <p>章引言。</p>
+      <p id="sec1"></p>
+      <h2>第一节 粮粒</h2>
+      <p>第一节正文。</p>
+      <p id="sec2"></p>
+      <h2>第二节 流散</h2>
+      <p>第二节正文。</p>
+    </body></html>
+    """
+
+    book.add_item(chapter)
+    book.toc = (
+        epub.Link("chapter.xhtml", "第一章 测试", "chapter"),
+        (
+            epub.Section("第一章 测试"),
+            (
+                epub.Link("chapter.xhtml#sec1", "第一节 粮粒", "sec1"),
+                epub.Link("chapter.xhtml#sec2", "第二节 流散", "sec2"),
+            ),
+        ),
+    )
+    book.spine = ["nav", chapter]
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    epub.write_epub(str(epub_path), book)
+
+    loader = DocumentLoader()
+    doc = loader.prepare(str(epub_path))
+    try:
+        assert doc.native_chapters is not None
+        assert [chapter["raw_title"] for chapter in doc.native_chapters] == [
+            "第一章 测试",
+            "第一节 粮粒",
+            "第二节 流散",
+        ]
+        line_starts = [chapter["line_start"] for chapter in doc.native_chapters]
+        assert line_starts == sorted(line_starts)
+        assert len(set(line_starts)) == 3
+    finally:
+        loader.cleanup(doc)
+
+
+def test_epub_toc_url_encoded_href_matches_spine_item(tmp_path: Path):
+    epub_path = tmp_path / "encoded_href.epub"
+    book = epub.EpubBook()
+    book.set_identifier("encoded-href-book")
+    book.set_title("Encoded Href Book")
+    book.set_language("en")
+
+    chapter = epub.EpubHtml(title="Chapter One", file_name="chapter one.xhtml", lang="en")
+    chapter.content = """
+    <html><body>
+      <h1>Chapter One</h1>
+      <p>Intro.</p>
+      <p id="sec 1"></p>
+      <h2>Section One</h2>
+      <p>Section body.</p>
+    </body></html>
+    """
+
+    book.add_item(chapter)
+    book.toc = (
+        epub.Link("chapter%20one.xhtml", "Chapter One", "chapter"),
+        epub.Link("chapter%20one.xhtml#sec%201", "Section One", "sec1"),
+    )
+    book.spine = ["nav", chapter]
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+    epub.write_epub(str(epub_path), book)
+
+    loader = DocumentLoader()
+    doc = loader.prepare(str(epub_path))
+    try:
+        assert doc.native_chapters is not None
+        assert [chapter["raw_title"] for chapter in doc.native_chapters] == [
+            "Chapter One",
+            "Section One",
+        ]
+        assert doc.native_chapters[0]["line_start"] < doc.native_chapters[1]["line_start"]
+    finally:
+        loader.cleanup(doc)
 
 
 def test_markdown_chapter_split_end_to_end(sample_markdown_path: Path, tmp_path: Path):

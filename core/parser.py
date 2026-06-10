@@ -370,6 +370,7 @@ class TextParser:
         # ── Strategy B: Dense heading clusters (fallback) ──
         raw_clusters: List[Tuple[int, int]] = []
         if len(chapters) > 2:
+            dense_toc_line_limit = min(1000, max(20, len(all_lines) // 10))
             cluster_start: Optional[int] = None
             dense_count: int = 0
             for ci in range(len(chapters) - 1):
@@ -382,11 +383,15 @@ class TextParser:
                         dense_count += 1
                 else:
                     if cluster_start is not None and dense_count >= 8:
-                        raw_clusters.append((cluster_start, ci))
+                        cluster_line = int(chapters[cluster_start].get('line_start', 0))
+                        if cluster_line <= dense_toc_line_limit:
+                            raw_clusters.append((cluster_start, ci))
                     cluster_start = None
                     dense_count = 0
             if cluster_start is not None and dense_count >= 8:
-                raw_clusters.append((cluster_start, len(chapters) - 1))
+                cluster_line = int(chapters[cluster_start].get('line_start', 0))
+                if cluster_line <= dense_toc_line_limit:
+                    raw_clusters.append((cluster_start, len(chapters) - 1))
         
         # ── Build toc_indices from both strategies ──
         toc_indices = set()
@@ -394,7 +399,9 @@ class TextParser:
         # From marker regions: any chapter whose line_start falls within a marker region
         for r_start, r_end in marker_regions:
             for ci, ch in enumerate(chapters):
-                if r_start <= ch['line_start'] <= r_end:
+                ch_start = int(ch.get('line_start', 0))
+                ch_end = int(ch.get('line_end', ch_start))
+                if ch_start <= r_end and ch_end >= r_start:
                     toc_indices.add(ci)
         
         # From dense clusters (only those not already covered by marker regions)

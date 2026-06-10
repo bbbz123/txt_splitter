@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+from urllib.parse import unquote
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -362,7 +363,10 @@ class DocumentLoader:
 
             raw_content = item.get_content()
             html = raw_content.decode("utf-8", errors="ignore") if isinstance(raw_content, bytes) else str(raw_content)
-            text = self._extract_html_text(html, prefer_xml=True)
+            text, anchor_offsets = self._extract_html_text_and_anchor_lines(html, prefer_xml=True)
+            if href:
+                for anchor, offset in anchor_offsets.items():
+                    href_to_line[f"{href}#{anchor}"] = len(lines) + offset
             if text.strip():
                 lines.extend(text.splitlines())
                 lines.append("")
@@ -396,7 +400,10 @@ class DocumentLoader:
         entries: List[Dict[str, Any]] = []
         stack: List[str] = []
         for level, title, href in flat:
-            line_start = href_to_line.get(self._normalize_href(href))
+            normalized_href = self._normalize_toc_href(href)
+            line_start = href_to_line.get(normalized_href)
+            if line_start is None and "#" in normalized_href:
+                line_start = href_to_line.get(normalized_href.split("#", 1)[0])
             if line_start is None:
                 continue
             safe = self._sanitize_title(title)
@@ -436,15 +443,59 @@ class DocumentLoader:
         return title.strip(), href.strip()
 
     def _extract_html_text(self, html: str, prefer_xml: bool = False) -> str:
-        from bs4 import BeautifulSoup  # type: ignore
+        text, _ = self._extract_html_text_and_anchor_lines(html, prefer_xml=prefer_xml)
+        return text
+
+    def _extract_html_text_and_anchor_lines(
+        self, html: str, prefer_xml: bool = False
+    ) -> Tuple[str, Dict[str, int]]:
+        from bs4 import BeautifulSoup, NavigableString, Tag  # type: ignore
+        from bs4.element import Comment, Declaration, Doctype, ProcessingInstruction  # type: ignore
 
         parser = "xml" if prefer_xml else "lxml"
         soup = BeautifulSoup(html, parser)
         for tag in soup(["script", "style"]):
             tag.extract()
-        text = soup.get_text("\n", strip=True)
+
+        lines: List[str] = []
+        anchor_to_line: Dict[str, int] = {}
+        pending_anchors: List[str] = []
+
+        def remember_anchor(value: Any) -> None:
+            if value is None:
+                return
+            anchor = str(value).strip()
+            if anchor and anchor not in anchor_to_line and anchor not in pending_anchors:
+                pending_anchors.append(anchor)
+
+        for node in soup.descendants:
+            if isinstance(node, Tag):
+                remember_anchor(node.get("id"))
+                remember_anchor(node.get("name"))
+                continue
+
+            if not isinstance(node, NavigableString):
+                continue
+            if isinstance(node, (Comment, Declaration, Doctype, ProcessingInstruction)):
+                continue
+
+            text = str(node).strip()
+            if not text:
+                continue
+
+            for anchor in pending_anchors:
+                anchor_to_line[anchor] = len(lines)
+            pending_anchors.clear()
+            lines.append(text)
+
+        if pending_anchors:
+            fallback_line = max(len(lines) - 1, 0)
+            for anchor in pending_anchors:
+                anchor_to_line[anchor] = fallback_line
+
+        text = "\n".join(lines)
         text = re.sub(r"\n{3,}", "\n\n", text)
-        return text
+        return text, anchor_to_line
 
     def _prepare_mobi_like(self, file_path: str, source_ext: str) -> PreparedDocument:
         import mobi  # type: ignore
@@ -498,8 +549,19 @@ class DocumentLoader:
     def _normalize_href(self, href: str) -> str:
         if not href:
             return ""
-        clean = href.split("#", 1)[0].strip()
+        clean = unquote(href.split("#", 1)[0].strip())
         return clean.replace("\\", "/")
+
+    def _normalize_toc_href(self, href: str) -> str:
+        if not href:
+            return ""
+        clean = unquote(href.strip()).replace("\\", "/")
+        if "#" not in clean:
+            return self._normalize_href(clean)
+        base, fragment = clean.split("#", 1)
+        base = self._normalize_href(base)
+        fragment = fragment.strip()
+        return f"{base}#{fragment}" if fragment else base
 
     def _sanitize_title(self, text: str) -> str:
         safe = re.sub(r'[\\/*?:"<>|]', "", text).strip()

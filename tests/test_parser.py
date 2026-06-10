@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
@@ -81,6 +82,35 @@ def test_english_parser():
     print(f"\nDetected English structure: {struct}")
     
     print("\nEnglish tests passed!")
+
+
+def test_late_dense_heading_cluster_is_not_treated_as_toc(tmp_path: Path):
+    parser = TextParser()
+    source = tmp_path / "late_dense_headings.txt"
+    output_dir = tmp_path / "out"
+
+    lines = ["第一章 正文开始\n"]
+    lines.extend(f"正文段落 {i}\n" for i in range(35))
+    lines.extend(f"第{i}章 短条目\n" for i in range(2, 12))
+    source.write_text("".join(lines), encoding="utf-8")
+
+    pattern = get_language("zh").preset_patterns["Common All (卷/编/篇/章/回/节)"]
+    chapters, encoding = parser.parse_chapters(str(source), [pattern], "utf-8")
+
+    parser.split_file(
+        str(source),
+        chapters,
+        str(output_dir),
+        encoding,
+        output_mode="Flat Folder",
+        skip_toc=True,
+        include_body=False,
+    )
+
+    out_files = sorted(path.name for path in output_dir.glob("*.txt"))
+    assert len(out_files) == 11
+    assert any("第2章 短条目" in name for name in out_files)
+    assert any("第11章 短条目" in name for name in out_files)
 
 
 if __name__ == "__main__":
